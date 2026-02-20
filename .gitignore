@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.log
+*.pem
+*.key
+*.crt
+.env
+x.json
+config.json
+.venv/
+venv/
+.cache/
+
+# Local artifacts / vendored tools
+backups/
+bpytop-master/
+daily_score.csv

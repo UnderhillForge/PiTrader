@@ -1,0 +1,9 @@
+coinbase-advanced-py==1.8.2
+openai==1.65.3
+python-dotenv==1.0.1
+python-dateutil==2.9.0.post0
+websockets==13.1
+requests==2.32.3
+ccxt==4.4.77
+twscrape==0.16.0
+textual==0.85.2

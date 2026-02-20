@@ -1,0 +1,17 @@
+[Unit]
+Description=CB Grok Console Stream
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/TradeBot
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/pi/TradeBot/.env
+ExecStart=/home/pi/TradeBot/.venv/bin/python /home/pi/TradeBot/console_main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
