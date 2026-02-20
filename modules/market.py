@@ -156,9 +156,11 @@ async def update_basket():
         active_spot = _next_spot_active_scan_window()
 
     # In CCXT spot mode, we do not depend on native spot discovery at all.
+    unsupported = set((cfg.state.get("unsupported_products") or {}).keys())
+
     if universe == "spot" and spot_ccxt_enabled:
         max_total = 40
-        new_basket = list(active_spot)[:max_total]
+        new_basket = [pid for pid in list(active_spot) if pid not in unsupported][:max_total]
 
         previous = set(cfg.state["basket"])
         current = set(new_basket)
@@ -228,7 +230,7 @@ async def update_basket():
     max_total = 40
 
     if universe == "all" and spot_ccxt_enabled:
-        spot_slice = list(active_spot)[: max(0, int(getattr(cfg, "SPOT_ACTIVE_SCAN_SIZE", 20) or 20))]
+        spot_slice = [pid for pid in list(active_spot) if pid not in unsupported][: max(0, int(getattr(cfg, "SPOT_ACTIVE_SCAN_SIZE", 20) or 20))]
         perp_slots = max(10, max_total - len(spot_slice))
         perps = [product_id for _, product_id in ranked if str(product_id).endswith("-PERP-INTX")]
         if not perps:
@@ -239,11 +241,12 @@ async def update_basket():
                 for product_id in (cfg.state.get("basket") or [])
                 if str(product_id).endswith("-PERP-INTX")
             ]
+        perps = [pid for pid in perps if pid not in unsupported]
         new_basket = (perps[:perp_slots] + spot_slice)[:max_total]
     else:
         if not ranked:
             return
-        new_basket = [product_id for _, product_id in ranked[:max_total]]
+        new_basket = [product_id for _, product_id in ranked if product_id not in unsupported][:max_total]
 
     if not new_basket:
         return
@@ -602,9 +605,14 @@ async def start_websockets():
             last_atr_refresh = now
 
         cycle_price_updates = 0
-        for product_id in cfg.state["basket"]:
+        to_drop = []
+        unsupported_products = cfg.state.setdefault("unsupported_products", {})
+
+        for product_id in list(cfg.state["basket"]):
+            if product_id in unsupported_products:
+                continue
             try:
-                product = cfg.client.get_product(product_id)
+                product = await asyncio.to_thread(cfg.client.get_product, product_id)
                 price_raw = _read_attr(product, "price")
                 if price_raw is None:
                     price_raw = _read_attr(product, "pricebook", {}).get("mid_market") if isinstance(_read_attr(product, "pricebook", {}), dict) else None
@@ -655,9 +663,33 @@ async def start_websockets():
                         micro_bucket.update(ob_metrics)
                         micro_bucket["ts"] = datetime.now(timezone.utc).isoformat()
                     cycle_price_updates += 1
-            except (AttributeError, TypeError, ValueError) as exc:
+            except Exception as exc:
                 mark_exchange_failure("market_price_poll", exc)
+                msg = str(exc or "")
+                msg_l = msg.lower()
+                # Auto-drop permanently unsupported products to avoid log spam and broken price loops.
+                if (
+                    "not supported" in msg_l
+                    or "productid is invalid" in msg_l
+                    or "invalid_argument" in msg_l
+                    or "not_found" in msg_l
+                    or "not found" in msg_l
+                ):
+                    unsupported_products[product_id] = {
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "reason": msg[:240],
+                    }
+                    to_drop.append(product_id)
+                    cfg.logger.warning("Dropping unsupported product from basket: %s (%s)", product_id, msg[:160])
                 continue
+
+        if to_drop:
+            existing = list(cfg.state.get("basket") or [])
+            filtered = [pid for pid in existing if pid not in set(to_drop)]
+            if filtered and filtered != existing:
+                cfg.state["basket"] = filtered
+                cfg.state["basket_ver"] += 1
+                cfg.logger.warning("Basket pruned to %d products (ver=%d) due to unsupported products", len(filtered), cfg.state["basket_ver"])
 
         if cycle_price_updates > 0:
             mark_exchange_success("market_price_poll")
