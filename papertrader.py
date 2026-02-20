@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Set
@@ -16,7 +17,7 @@ from modules.single_instance import SingleInstanceError, SingleInstanceLock
 @dataclass
 class SessionStats:
     start_ts: datetime
-    end_ts: datetime
+    end_ts: Optional[datetime] = None
     start_equity: Optional[float] = None
     last_equity: Optional[float] = None
     max_equity: Optional[float] = None
@@ -49,7 +50,7 @@ class PaperTraderLogger:
         self._ws_connected_once: bool = False
 
     def _now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        return datetime.now().astimezone()
 
     def _fmt(self, value: Optional[float], digits: int = 2) -> str:
         if value is None:
@@ -63,7 +64,7 @@ class PaperTraderLogger:
             return float(default)
 
     def _write_line(self, message: str) -> None:
-        ts = self._now().isoformat()
+        ts = self._now().isoformat(timespec="seconds")
         line = f"[{ts}] {message}"
         print(line, flush=True)
         with open(self.log_path, "a", encoding="utf-8") as handle:
@@ -213,9 +214,14 @@ class PaperTraderLogger:
         stats.realized_pnl_start = realized
         stats.realized_pnl_last = realized
 
+        if stats.end_ts is None:
+            duration_text = "unbounded"
+        else:
+            duration_text = f"{(stats.end_ts - stats.start_ts).total_seconds() / 3600:.2f}"
+
         self._write_line(
             "SESSION_START "
-            f"duration_h={(stats.end_ts - stats.start_ts).total_seconds() / 3600:.2f} "
+            f"runtime_h={duration_text} "
             f"equity={self._fmt(self._safe_float(equity, 0.0))} "
             f"sim_realized_pnl={self._fmt(realized)} mode={mode} ready={ready} open_trades={open_count}"
         )
@@ -338,38 +344,64 @@ class PaperTraderLogger:
             f"journal_net={stats.journal_net_pnl:+.2f}"
         )
 
-    async def run(self, duration_hours: float) -> None:
+    async def run(self, runtime_hours: Optional[float]) -> None:
         start_ts = self._now()
-        end_ts = start_ts + timedelta(hours=max(0.001, float(duration_hours)))
+        if runtime_hours is None:
+            end_ts = None
+        else:
+            try:
+                hours = float(runtime_hours)
+            except (TypeError, ValueError):
+                hours = 0.0
+            end_ts = start_ts + timedelta(hours=max(0.001, hours)) if hours > 0 else None
         stats = SessionStats(start_ts=start_ts, end_ts=end_ts)
 
+        runtime_text = "unbounded" if end_ts is None else f"{(end_ts - start_ts).total_seconds() / 3600:.2f}"
         self.seen_closed_trade_ids = self._existing_closed_trade_ids()
         self._write_line(
-            f"PAPERTRADER_INIT ws_url={self.ws_url} log={self.log_path} duration_h={duration_hours:.2f} baseline_closed_trades={len(self.seen_closed_trade_ids)}"
+            f"PAPERTRADER_INIT ws_url={self.ws_url} log={self.log_path} runtime_h={runtime_text} baseline_closed_trades={len(self.seen_closed_trade_ids)}"
         )
 
-        while self._now() < end_ts:
-            snapshot = await self._fetch_snapshot()
-            if snapshot is None:
+        try:
+            while True:
+                if end_ts is not None and self._now() >= end_ts:
+                    break
+
+                snapshot = await self._fetch_snapshot()
+                if snapshot is None:
+                    await asyncio.sleep(self.interval_sec)
+                    continue
+
+                if stats.start_equity is None:
+                    self._log_start(stats, snapshot)
+
+                self._log_snapshot_changes(stats, snapshot)
+                self._log_closed_trades_from_db(stats)
+                self._log_heartbeat_if_due(stats, snapshot)
+
                 await asyncio.sleep(self.interval_sec)
-                continue
-
-            if stats.start_equity is None:
-                self._log_start(stats, snapshot)
-
-            self._log_snapshot_changes(stats, snapshot)
-            self._log_closed_trades_from_db(stats)
-            self._log_heartbeat_if_due(stats, snapshot)
-
-            await asyncio.sleep(self.interval_sec)
-
-        await self._close_ws()
-        self._log_end(stats)
+        finally:
+            await self._close_ws()
+            self._log_end(stats)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Paper trading session logger for simulation performance evaluation")
-    parser.add_argument("--duration-hours", type=float, default=18.0, help="How long to run the logger (default: 18)")
+    parser.add_argument(
+        "--rt",
+        "--runtime-hours",
+        dest="runtime_hours",
+        type=float,
+        default=None,
+        help="Optional runtime in hours (e.g. --rt 8). If omitted, runs until stopped.",
+    )
+    parser.add_argument(
+        "--duration-hours",
+        dest="runtime_hours",
+        type=float,
+        default=None,
+        help="Legacy alias for --rt/--runtime-hours.",
+    )
     parser.add_argument("--interval-sec", type=float, default=5.0, help="Polling interval in seconds (default: 5)")
     parser.add_argument("--heartbeat-sec", type=int, default=300, help="Heartbeat interval in seconds (default: 300)")
     parser.add_argument("--ws-url", default="ws://127.0.0.1:8765", help="Console websocket URL")
@@ -377,7 +409,31 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _normalize_tz_name(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    key = text.strip().lower().replace("_", "-")
+    if key in {"us-east", "useast", "us/east", "eastern", "est", "edt", "america-new-york"}:
+        return "America/New_York"
+    if key in {"utc", "gmt", "z"}:
+        return "UTC"
+    return text
+
+
+def _apply_log_timezone() -> None:
+    tz_name = _normalize_tz_name(os.getenv("LOG_TIMEZONE") or "")
+    if not tz_name:
+        return
+    os.environ["TZ"] = tz_name
+    try:
+        time.tzset()
+    except (AttributeError, OSError):
+        pass
+
+
 def main() -> None:
+    _apply_log_timezone()
     args = build_parser().parse_args()
     runner = PaperTraderLogger(
         log_path=args.log,
@@ -387,7 +443,7 @@ def main() -> None:
     )
     try:
         with SingleInstanceLock("tradebot-papertrader"):
-            asyncio.run(runner.run(duration_hours=args.duration_hours))
+            asyncio.run(runner.run(runtime_hours=args.runtime_hours))
     except SingleInstanceError as exc:
         runner._write_line(f"STARTUP_BLOCKED {exc}")
         sys.exit(1)
