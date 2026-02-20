@@ -17,3 +17,9 @@ venv/
 backups/
 bpytop-master/
 daily_score.csv
+legacy/
+
+# Local notes / copilot scratch (keep out of repo)
+copilot.prompt
+improvements.md
+update.md

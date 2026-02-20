@@ -83,6 +83,8 @@ The snapshot currently includes:
   - `top_histories`
   - `focus_asset`, `focus_price_history`
 
+Universe note: the runtime basket can include **perps** (`*-PERP-INTX`) and/or **spot** (`*-USD`, `*-USDC`) depending on `PRODUCT_UNIVERSE`.
+
 - **Trades**
   - `open_trades_count`
   - `open_trades` (id, asset, side, entry, remaining_size, stop, take_profit, rr, sleeve, pump_score, vol_spike, execution_path, guard_spread_pct, guard_size_to_vol1m_pct)
@@ -95,7 +97,7 @@ The snapshot currently includes:
 
 - **Execution path telemetry**
   - `execution_last_ok`
-  - `execution_last_path` (`post_only` / `ioc` / `market` / `dry_run`)
+  - `execution_last_path` (`post_only` / `ioc` / `limit_retry_ioc` / `market` / `dry_run` / `rejected`)
   - `execution_last_reason`
   - `execution_last_ts`
 
@@ -212,6 +214,23 @@ This is the easiest way to answer postmortem questions like:
 - Config file: `config.json`
 - Reload behavior: `cfg.reload_hot_config()` is called repeatedly in runtime loops.
 - Hot-safe keys include intervals, health thresholds, data-quality gates, drawdown thresholds, and sim realism knobs.
+
+Security note: `config.json` typically contains API keys/secrets and is intentionally git-ignored.
+
+### Spot universe + scanning controls
+
+The bot can trade spot, perps, or both:
+
+- `PRODUCT_UNIVERSE`: `perp` | `spot` | `all`
+- `SPOT_QUOTES`: comma list (default `USD,USDC`)
+- `SPOT_DISCOVERY_MODE`: `native` | `ccxt`
+  - `native` uses Coinbase product metadata only.
+  - `ccxt` uses CCXT market discovery to build a large spot universe, then a rotating active scan window.
+- `SPOT_DISCOVERY_REFRESH_SEC`: refresh cadence for CCXT discovery (default 14400)
+- `SPOT_PRIORITY_SIZE`: number of top-volume spot markets kept in the priority list (default 200)
+- `SPOT_ACTIVE_SCAN_SIZE`: how many spot markets are active in the rotating scan window at a time (default 20)
+
+Important: the WebSocket snapshot reports only the current `basket`-derived views (`basket_size`, `top_prices`, etc). It does not currently expose the full discovered spot universe or priority list.
 
 ## Park/unpark control
 
