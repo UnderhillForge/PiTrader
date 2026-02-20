@@ -1,7 +1,7 @@
 import asyncio
 import sqlite3
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import xml.etree.ElementTree as ET
 import re
@@ -64,17 +64,25 @@ def _x_cooldown_active():
         until_dt = datetime.fromisoformat(until_text)
     except ValueError:
         return False
-    if until_dt <= datetime.utcnow():
+    if until_dt.tzinfo is None:
+        until_dt = until_dt.replace(tzinfo=timezone.utc)
+    if until_dt <= datetime.now(timezone.utc):
         return False
     return True
 
 
 def _activate_x_cooldown(reason):
     minutes = _x_cooldown_minutes()
-    until_dt = datetime.utcnow() + timedelta(minutes=minutes)
+    until_dt = datetime.now(timezone.utc) + timedelta(minutes=minutes)
     cfg.state["x_cooldown_until"] = until_dt.isoformat()
     cfg.state["x_cooldown_reason"] = str(reason or "x_fetch_error")[:220]
-    cfg.logger.warning("X cooldown active for %dm until %s (%s)", minutes, until_dt.isoformat(), cfg.state["x_cooldown_reason"])
+    until_local = until_dt.astimezone()
+    cfg.logger.warning(
+        "X cooldown active for %dm until %s (%s)",
+        minutes,
+        until_local.isoformat(timespec="seconds"),
+        cfg.state["x_cooldown_reason"],
+    )
 
 
 def _public_whale_notional_usd_threshold():

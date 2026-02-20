@@ -1,6 +1,7 @@
 import os
 import logging
 import json
+import time
 from datetime import datetime
 from threading import Lock
 try:
@@ -23,8 +24,6 @@ except ImportError:
     AsyncOpenAI = None
 
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
-logger = logging.getLogger(__name__)
 
 
 def _load_json_config():
@@ -41,6 +40,30 @@ def _load_json_config():
 
 _JSON_CONFIG = _load_json_config()
 _HOT_RELOAD_LOCK = Lock()
+
+
+def _normalize_tz_name(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    key = text.strip().lower().replace("_", "-")
+    if key in {"us-east", "useast", "us/east", "eastern", "est", "edt", "america-new-york"}:
+        return "America/New_York"
+    if key in {"utc", "gmt", "z"}:
+        return "UTC"
+    return text
+
+
+_LOG_TIMEZONE = _normalize_tz_name(os.getenv("LOG_TIMEZONE") or _JSON_CONFIG.get("LOG_TIMEZONE") or "")
+if _LOG_TIMEZONE:
+    os.environ["TZ"] = _LOG_TIMEZONE
+    try:
+        time.tzset()
+    except (AttributeError, OSError):
+        pass
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
 
 
 def _cfg(name, default=None):
