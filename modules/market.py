@@ -524,9 +524,17 @@ def _fetch_candles(product_id, granularity):
 
 
 async def refresh_atr_cache():
-    for product_id in cfg.state["basket"]:
-        one_hour = _fetch_candles(product_id, "ONE_HOUR")
-        six_hour = _fetch_candles(product_id, "SIX_HOUR")
+    unsupported = set((cfg.state.get("unsupported_products") or {}).keys())
+
+    for product_id in list(cfg.state.get("basket") or []):
+        if product_id in unsupported:
+            continue
+
+        # Use 1h candles as the single source of truth and aggregate for higher timeframes.
+        # This avoids relying on exchange-provided SIX_HOUR candles which can be unavailable for many spot products.
+        one_hour = await asyncio.to_thread(_fetch_candles, product_id, "ONE_HOUR")
+        six_hour = _aggregate_candles(one_hour, bucket_seconds=6 * 3600)
+
         atr_1h = compute_atr(one_hour, period=14)
         atr_6h = compute_atr(six_hour, period=14)
         atr_1h, atr_6h = normalize_atr_bundle(atr_1h, atr_6h)
